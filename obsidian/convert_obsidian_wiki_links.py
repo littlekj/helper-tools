@@ -1,9 +1,8 @@
 """
 需求：
-- 将 Markdown 笔记中的本地资源链接转换为外部链接
+- 将 Markdown 笔记中的本地资源内部链接格式转换为标准的 Markdown 链接格式
 - 处理所有类型的 Obsidian 链接：[[文件]] 和 ![[文件]]
-- 更新文件中的链接为外部链接
-- 复制图片资源到汇总目录
+
 """
 import os
 import shutil
@@ -20,12 +19,10 @@ logger = logging.getLogger('ObsidianLinkConverter')
 # 配置路径
 source_folder = "Default"
 # source_note_dir = fr'D:\Obsidian\{source_folder}'
-# source_note_dir = fr'D:\Obsidian\temp'
 source_note_dir = fr'D:\Obsidian\bak\Default - origin'
 target_note_dir = fr'D:\Obsidian\Middle\{source_folder}'
-new_image_dir = fr'D:\Obsidian\Middle\linkres'
-new_image_subfolder = "obsidian"
 # external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'
+# external_link_prefix = '/'  # 前缀添加 / 生成绝对路径，拼接 GitHub 仓库地址便于 Web 访问
 external_link_prefix = ''
 
 # 定义所有支持的文件类型（扩展列表）
@@ -44,7 +41,6 @@ for category in supported_extensions.values():
 extensions_pattern = '|'.join(all_extensions)
 
 # 正则表达式匹配所有 Obsidian 链接
-# 格式：[[文件名]] 或 ![[文件名]]
 # test_cases = [
 #     "[[#标题]]",                  # 纯锚点
 #     "[[#标题|见上文]]",            # 锚点 + 别名
@@ -71,25 +67,33 @@ code_pattern = re.compile(
 # 全局资源缓存（避免重复查找）
 resource_cache = {}
 
+def confirm_delete(path):
+    """确认是否删除指定路径"""
+    confirm = input(f"⚠️  确认删除内容：{path}？(y/N): ").strip().lower()
+    return confirm == 'y'    
 
-def remove_if_exists(file_path):
+def remove_if_exists(path):
     """删除文件或目录，如果存在"""
-    if os.path.exists(file_path):
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-        elif os.path.isdir(file_path):
-            shutil.rmtree(file_path)
-        logger.info(f"已删除: {file_path}")
+    if os.path.exists(path):
+        if os.path.isfile(path):
+            os.remove(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+        logger.info(f"已删除: {path}")
 
+def safe_remove_if_exists(path):
+    """安全删除目录，先确认再执行"""
+    if confirm_delete(path):
+        remove_if_exists(path)
+    else:
+        print("❌ 已取消删除操作。")  
+        sys.exit(1)  # 立即退出程序
 
 # 确认删除目标目录
-remove_if_exists(target_note_dir)
-remove_if_exists(new_image_dir)
+safe_remove_if_exists(target_note_dir)
 
 # 创建新目录
 os.makedirs(target_note_dir, exist_ok=True)
-os.makedirs(new_image_dir, exist_ok=True)
-
 
 def copy_files(source_note_dir, ignored_extensions=None):
     """复制源目录中的所有文件到目标目录"""
@@ -136,7 +140,7 @@ def get_ignore_list(target_dir):
 def iterate_files(target_note_dir):
     """遍历目标目录中的所有笔记文件更新链接"""
     ignored_dirs = get_ignore_list(target_note_dir)
-
+    updated_count = 0
     for root, dirs, files in os.walk(target_note_dir):
         # 排除特定子目录
         dirs[:] = [d for d in dirs if d not in ignored_dirs]
@@ -144,8 +148,11 @@ def iterate_files(target_note_dir):
         for file in files:
             if file.endswith('.md'):
                 note_file_path = os.path.join(root, file)
+                updated_count += 1
                 logger.info(f"处理笔记: {note_file_path}")
                 update_resource_links(note_file_path)
+                
+    return updated_count
 
 
 def find_resource_file(source_dir, resource_path, current_note_dir):
@@ -156,6 +163,9 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
     :param current_note_dir: 当前笔记所在目录
     :return: 基于仓库根目录的相对路径，如果找不到返回None
     """
+    # 转换URL编码的空格为普通空格
+    resource_path = decode_url_space_only(resource_path)
+
     # 检查缓存
     cache_key = (resource_path, current_note_dir)
     if cache_key in resource_cache:
@@ -168,13 +178,17 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
     relative_to_note = os.path.join(current_note_dir, resource_path)
     possible_paths.append(relative_to_note)
     
-    # 绝对路径（相对于仓库根目录）
-    abs_path = os.path.join(source_dir, resource_path[1:])
-    possible_paths.append(abs_path)
+    # 相对于仓库根目录的路径
+    relative_to_root = os.path.join(source_dir, resource_path)
+    possible_paths.append(relative_to_root)
+    
+    # 尝试解析绝对路径（以 / 开头）
+    if resource_path.startswith('/'):
+        abs_path = os.path.abspath(os.path.join(source_dir, resource_path[1:]))
+        possible_paths.append(abs_path)
         
     # 尝试解析相对路径（以 ./ 或 ../ 开头）
-    if resource_path.startswith(('./', '../')):
-        # 解析相对路径为绝对路径
+    elif resource_path.startswith(('./', '../')):
         abs_path = os.path.abspath(os.path.join(current_note_dir, resource_path))
 
         # 确保路径在仓库根目录内
@@ -185,15 +199,24 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
 
         possible_paths.append(abs_path)
         
+    # 尝试解析其他相对路径
+    else:
+        # 尝试相对于当前仓库的相对路径
+        direct_path = os.path.normpath(os.path.join(source_dir, resource_path))
+        possible_paths.append(direct_path)
+        
+        # 尝试相对于当前笔记的隐式相对路径
+        abs_path = os.path.normpath(os.path.join(current_note_dir, resource_path))
+        possible_paths.append(abs_path)
+        
     for path in possible_paths:
-        # 尝试所有原始路径
+        # 判断路径是否为文件
         if os.path.isfile(path):
             rel_path = os.path.relpath(path, source_dir)
             resource_cache[cache_key] = rel_path
             return rel_path
         # 文件名形如：file.ext.ext，但插入的可能是 file.ext
-        # 所以，不做判断，直接尝试添加扩展名
-        # elif '.' not in os.path.basename(path):
+        # 尝试直接添加扩展名
         else:
             for ext in all_extensions:
                 extended_path = f"{path}.{ext}"
@@ -202,27 +225,17 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
                     resource_cache[cache_key] = rel_path
                     return rel_path
 
-    # 尝试全库文件名搜索（针对异常插入的文件名路径）              
+    # 尝试全库文件名搜索     
     filename = os.path.basename(resource_path)
-    if filename != resource_path:  # 如果路径包含目录结构
-        for root, dirs, files in os.walk(source_dir):
-            for file in files:
-                # 匹配文件名（带扩展名或不带扩展名）
-                if file == filename:
-                    file_path = os.path.join(root, file)
-                    if os.path.isfile(file_path):
-                        rel_path = os.path.relpath(file_path, source_dir)
-                        resource_cache[cache_key] = rel_path
-                        return rel_path
-                else:
-                    for ext in all_extensions:
-                        extended_filename = f"{filename}.{ext}"
-                        if file == extended_filename:
-                            file_path = os.path.join(root, file)
-                            if os.path.isfile(file_path):
-                                rel_path = os.path.join(file_path, source_dir)
-                                resource_cache[cache_key] = rel_path
-                                return rel_path
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            # 匹配文件名（带扩展名或不带扩展名）
+            if file == filename or any(file == f"{filename}.{ext}" for ext in all_extensions):
+                file_path = os.path.join(root, file)
+                if os.path.isfile(file_path):
+                    rel_path = os.path.relpath(file_path, source_dir)
+                    resource_cache[cache_key] = rel_path
+                    return rel_path
 
     # 未找到资源
     resource_cache[cache_key] = None
@@ -266,6 +279,12 @@ def encode_url_space_only(url):
     """
     return url.replace(" ", "%20")
 
+def decode_url_space_only(url):
+    """
+    仅对URL中的空格进行解码
+    """
+    return url.replace("%20", " ")
+
 
 def update_resource_links(note_file_path):
     """
@@ -275,6 +294,7 @@ def update_resource_links(note_file_path):
     with open(note_file_path, 'r', encoding='utf-8', newline='') as file:
         content = file.read()
 
+    # 提取代码内容并用占位符替换
     content, code_blocks = save_code_blocks(content)
     
     # 当前笔记所在目录
@@ -317,9 +337,6 @@ def update_resource_links(note_file_path):
         
         # 对空格进行编码
         external_link = encode_url_space_only(external_link)
-
-        # 临时：生成外部链接格式的绝对路径，便于 GitHub 访问
-        external_link = os.path.join('/', external_link)
         
         # 获取文件类型
         file_type = get_file_type(resource_path)
@@ -346,37 +363,11 @@ def update_resource_links(note_file_path):
     # 使用正则表达式替换资源链接
     updated_content = link_regex.sub(replacement, content)
 
+    # 恢复代码块
     updated_content = restore_code_blocks(updated_content, code_blocks)
 
     with open(note_file_path, 'w', encoding='utf-8', newline='') as file:
         file.write(updated_content)
-
-
-def copy_image_files(source_dir, target_dir):
-    """
-    复制所有资源文件到目标目录
-    :param source_dir: 源目录
-    :param target_dir: 目标目录
-    """
-    remove_if_exists(target_dir)
-    os.makedirs(target_dir, exist_ok=True)
-
-    ignored_dirs = get_ignore_list(source_dir)
-    copied_count = 0
-
-    for root, dirs, files in os.walk(source_dir):
-        # 排除特定子目录
-        dirs[:] = [d for d in dirs if d not in ignored_dirs]
-
-        for file in files:
-            file_type = get_file_type(file)
-            if file_type == 'image':
-                source_file_path = os.path.join(root, file)
-                target_file_path = os.path.join(target_dir, file)
-                shutil.copy2(source_file_path, target_file_path)
-                copied_count += 1
-
-    logger.info(f"共复制 {copied_count} 个资源文件")
 
 
 def main():
@@ -384,22 +375,16 @@ def main():
     logger.info("开始处理...")
     logger.info(f"源目录: {source_note_dir}")
     logger.info(f"目标目录: {target_note_dir}")
-    logger.info(f"图片汇总目录: {os.path.join(new_image_dir, new_image_subfolder)}")
 
     # 复制文件（忽略特定扩展名）
     ignored_extensions = ['.tmp', '.DS_Store']
     copy_files(source_note_dir, ignored_extensions)
 
     # 更新笔记中的资源链接
-    iterate_files(target_note_dir)
-
-    # 汇总资源文件
-    target_resource_dir = os.path.join(new_image_dir, new_image_subfolder)
-    copy_image_files(source_note_dir, target_resource_dir)
+    updated_count = iterate_files(target_note_dir)
 
     logger.info("\n✅ 处理完成！")
-    logger.info(f"笔记已处理: {target_note_dir}")
-    logger.info(f"资源文件已汇总: {target_resource_dir}")
+    logger.info(f"共处理 {updated_count} 个笔记: {target_note_dir}")
 
 
 if __name__ == "__main__":
