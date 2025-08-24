@@ -1,21 +1,61 @@
 """
 需求目标
 
-- 将 Markdown 文件中引用的本地资源路径（如图片、文件）自动转换为可通过 Web 访问的外部 URL 格式
+将 Markdown 文件中引用的本地资源路径（如图片、文件）自动转换为可通过 Web 访问的外部 URL 格式。
 
-处理范围
+处理 Obsidian 文档中的链接格式范围：
 
-1. Obsidian 特有的 Wiki 链接格式：
-   - 普通文件链接：`[[文件路径]]`
-   - 图片资源链接：`![[图片路径]]`
-   - 支持带锚点的链接：`[[文件路径#锚点]]`
-   - 支持带别名的链接：`[[文件路径|别名]]`
+1. Obsidian 支持的 Wiki 链接格式
 
-2. 标准 Markdown 链接格式：
-   - 普通超链接：`[描述](文件路径)`
-   - 图片链接：`![描述](图片路径)`
-   - 支持带锚点的链接：`[描述](文件路径#锚点)`
-   - 支持图片尺寸声明：`![200x300](图片.png)`
+- 当前文件内锚点链接：`[[#标题]]`     
+- 当前文件内块标识符链接：`[[#^块标识符]]`
+- 普通文件链接：`[[assets/file1.md]]`
+- 支持文件带锚点：`[[assets/file2.md#标题]]`
+- 支持文件带块标识符：`[[assets/file3.md#^块标识符]]`
+- 支持文件带别名：`[[assets/file4.md|别名]]`
+- 支持文件带锚点和别名：`[[assets/file5.md#标题|别名]]`
+- 支持文件带块标识符和别名：`[[assets/file6.md#^块标识符|别名]]`
+- 图片资源链接：`![[assets/image1.png]]`
+- 支持图片带尺寸声明：`![[assets/image2.png | 400x300]]`
+- 支持图片仅指定宽度：`![[assets/image3.png | 400]]`
+
+2. 标准 Markdown 链接格式
+
+- 当前文件内锚点链接：`[别名](#标题)`
+- 普通文件链接：`[别名](assets/file7.md)`
+- 支持文件带锚点：`[别名](assets/file8.md#标题)`
+- 图片资源链接：`![描述](assets/image4.png)`
+- 普通资源链接指向图片：`[描述](assets/image5.png)`
+   
+3. Obsidian Markdown 扩展
+
+- 当前文件内锚点嵌入：`![别名](#标题)`
+- 当前文件内块标识符嵌入`![别名](#^块标识符)`
+- 当前文件内块标识符链接：`[别名](#^块标识符)`
+- 支持文件带块标识符：`[别名](assets/file9.md#^块标识符)`
+- 支持图片带尺寸声明：`![400x300](assets/image6.png)`
+- 支持图片带描述和尺寸声明：`![描述 | 400x300](assets/image7.png)`
+- 支持图片带描述和仅宽度声明：`![描述 | 400](assets/image8.png)`
+
+4. Obsidian 特殊嵌入格式
+
+- 当前文件内锚点嵌入：`![[#标题]]`
+- 当前文件内块标识符嵌入：`![[#^块标识符]]`
+- 嵌入文件内容：`![[assets/file10.md]]`
+- 嵌入 PDF 页面指定页数：`![[assets/doc.pdf#page=3]]`
+
+5. 补充：
+
+- ![描述](http://example.com/image.png)
+- ![描述](https://example.com/audio.mp3)
+- ![描述|400x300](assets/image%20copy.png)
+
+处理说明:
+
+- 将所有本地资源路径转换为外部 URL 格式，并保留原始链接的别名和描述。
+- 嵌入图片链接，生成嵌入式图片的 HTML，可保留原始链接的描述和尺寸声明。
+- 非嵌入图片链接，生成图片的 Markdown 链接，可保留原始链接的描述。
+- 普通文件链接，生成文件的 Markdown 链接，可保留原始链接的锚点标题和别名，但不保留块标识符。
 
 """
 import os
@@ -26,20 +66,22 @@ import sys
 from pathlib import Path
 import logging
 
+import argparse
+import subprocess
+import shlex
+from typing import Optional
+
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger('ObsidianLinkConverter')
 
 # 配置路径
 source_folder = "Default"
-# source_note_dir = fr'D:\Obsidian\{source_folder}'
-source_note_dir = fr'D:\Obsidian\bak\Default - origin'
-target_note_dir = fr'D:\Obsidian\Middle\{source_folder}'
-# new_image_dir = fr'D:\Obsidian\Middle\linkres'
-# new_image_subfolder = "obsidian"
-external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'
-# external_link_prefix = '/'  # 前缀添加 / 生成绝对路径，拼接 GitHub 仓库地址便于 Web 访问
-
+source_note_dir = fr'D:\Obsidian\Middle\Default'
+target_note_dir = fr'D:\Obsidian\Middle\obsidianlinks'
+# external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'
+external_link_prefix = '/'  # 相对地址前缀添加 / 生成绝对路径，拼接 GitHub 仓库地址便于 Web 访问
+# external_link_prefix = ''
 
 # 定义所有支持的文件类型（扩展列表）
 supported_extensions = {
@@ -55,50 +97,533 @@ all_extensions = []
 for category in supported_extensions.values():
     all_extensions.extend(category)
     
-# 匹配 Obsidian 特有的 Wiki 链接格式
-# 格式：[[文件]] 或 ![[文件]]
-link_regex = re.compile(
-    r'(!?)\[\[([^\]\|\n#]*?)(?:#([^\]\|\n]*?))?(?:\|([^\]\|\n]*?))?(?:\|(\d+)(?:x(\d+))?)?\]\]',
+# 全局资源缓存（避免重复查找）
+resource_cache = {}
+
+
+# 只在 Windows 平台导入 pywin32 模块
+if os.name == 'nt':
+    try:
+        import win32file
+        import pywintypes
+    except ImportError:
+        print("请安装 pywin32 库以修复目录的时间戳")  
+
+
+def fix_directory_timestamps(src_dir: str, dst_dir: str):
+    """
+    修复 Windows 下目标目录时间戳（创建、修改、访问）
+    """
+    if not os.path.exists(dst_dir):
+        print(f"无法修复时间戳：目标目录不存在 {dst_dir}")
+        return
+
+    try:
+        src_stat = os.stat(src_dir)
+        ctime = pywintypes.Time(src_stat.st_ctime)
+        atime = pywintypes.Time(src_stat.st_atime)
+        mtime = pywintypes.Time(src_stat.st_mtime)
+
+        handle = win32file.CreateFile(
+            dst_dir,
+            win32file.GENERIC_WRITE,
+            win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
+            None,
+            win32file.OPEN_EXISTING,
+            win32file.FILE_FLAG_BACKUP_SEMANTICS,  # 用于操作目录
+            None
+        )
+        try:
+            win32file.SetFileTime(handle, ctime, atime, mtime)
+        finally:
+            handle.close()
+    except Exception as e:
+        print(f"修复目录时间戳失败 {dst_dir}: {e}")
+
+
+def robocopy_copy(src: str, dst: str) -> bool:
+    """
+    Windows 系统下使用 robocopy 复制文件或目录，保留时间戳（创建、修改、访问）
+    :param src: 源文件或目录路径
+    :param dst: 目标路径（文件或目录）
+    """
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"源路径不存在: {src}")
+
+    is_file = os.path.isfile(src)
+    
+    # 如果目标是文件且源是文件，robocopy 不支持，需后处理
+    dst_is_file = (
+        not dst.endswith(os.sep) and
+        os.path.splitext(dst)[1] != '' and
+        not os.path.isdir(dst)
+    )
+    
+    if is_file:
+        parent_src = os.path.dirname(src)
+        parent_dst = os.path.dirname(dst) if dst_is_file else dst
+        file_list = [os.path.basename(src)]
+    else:
+        parent_src = src
+        parent_dst = dst
+        file_list = []
+
+    # 创建目标父目录
+    os.makedirs(parent_dst, exist_ok=True)
+
+    # 优先使用 shell=False + 列表
+    # 构建 robocopy 命令
+    cmd = [
+        "robocopy",
+        parent_src,
+        parent_dst,
+        *file_list,
+        "/COPY:DAT",     # 复制数据、属性、时间戳
+        "/DCOPY:T",      # 复制目录时间戳（创建、修改、访问）
+        # "/E",            # 包含子目录（含空目录）
+        "/R:0", "/W:0",  # 不重试
+        "/NFL", "/NDL",  # 不输出文件和目录
+        "/NJH", "/NJS",  # 无作业头和尾
+        "/NC", "/NS",    # 不输出文件大小、摘要
+        "/IS",           # 复制相同文件（不跳过）
+        "/IT"            # 复制相同文件的时间戳（即使数据没变）
+    ]
+
+    if not is_file:
+        cmd.append("/E")  # 包含子目录（含空目录）
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,    # 5分钟超时
+            shell=False     # 避免 shell 注入
+            # shell=True      # 支持内建命令和变量替换
+        )
+
+        # robocopy 返回码：0~7 成功，8+ 失败
+        # 0: 无复制（文件已最新）
+        # 1: 成功复制文件
+        # 2: 有额外文件
+        # 3: 1+2
+        # 8+: 严重错误
+        success = result.returncode < 8
+
+        # 输出日志
+        if result.stdout.strip():
+            print("=== robocopy 输出 ===\n" + result.stdout)
+        if result.stderr.strip():
+            print("=== robocopy 错误 ===\n" + result.stderr)
+
+        if success:
+            # 如果目标是文件，robocopy 实际复制到了目标目录，替换成目标文件名
+            if is_file and dst_is_file:
+                temp_path = os.path.join(parent_dst, os.path.basename(src))
+                if os.path.exists(temp_path):
+                    os.replace(temp_path, dst)
+            # 修复目录时间戳
+            if os.path.isdir(dst) and os.path.isdir(src):
+                fix_directory_timestamps(src, dst)
+        else:
+            print(f"复制失败（返回码: {result.returncode}")
+
+        return success
+
+    except subprocess.TimeoutExpired:
+        print("robocopy 执行超时")
+        return False
+    except Exception as e:
+        print(f"robocopy 执行失败: {e}")
+        return False
+
+
+def remote_path_type(user_host: str, remote_path: str) -> Optional[str]:
+    """
+    检查远程路径类型
+    :return: 'file', 'directory', 'link', 'not_exists', None(执行失败)
+    """
+    quoted = shlex.quote(remote_path)
+    check_cmd = (
+        f"if [ -d {quoted} ]; then echo 'directory'; "
+        f"elif [ -f {quoted} ]; then echo 'file'; "
+        f"elif [ -L {quoted} ]; then echo 'link'; "
+        f"else echo 'not_exists'; fi"
+    )
+    cmd = ["ssh", user_host, check_cmd]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding='utf-8',
+            errors='replace'
+        )
+        out = result.stdout.strip()
+        if out in ('file', 'directory', 'link', 'not_exists'):
+            return out
+        return None
+    except Exception as e:
+        print(f"SSH 检查失败: {e}")
+        return None
+
+
+def ensure_remote_dir(user_host: str, remote_path: str) -> bool:
+    """通过 SSH 确保远程目录存在"""
+    cmd = ["ssh", user_host, f"mkdir -p {shlex.quote(remote_path)}"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace'
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"创建远程目录失败: {e}")
+        return False
+
+
+def rsync_copy(src: str, dst: str) -> bool:
+    """
+    Unix 系统，使用 rsync 复制保留修改、访问时间戳
+    支持：本地到本地、本地到远程的复制
+    :param src: 源文件或目录路径
+    :param dst: 目标路径（文件或目录），支持 user@host:/path
+    """
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"源路径不存在: {src}")
+
+    src_path = src.rstrip('/') + '/' if os.path.isdir(src) else src
+
+    # 检查是否是远程路径
+    # is_remote = '@' in dst and ':' in dst
+    # 使用正则解析远程路径（支持 IPv6）
+    remote_match = r'^((?P<user>[^@]+)@)?(?P<host>\[[^\]]+\]|[^:]+):(?P<path>/.*)$'
+    match = re.match(remote_match, dst)
+    is_remote = bool(match)
+
+    if is_remote:
+        user = match.group('user') or ''
+        host = match.group('host')
+        user_host = f"{user}@{host}" if user else host
+        remote_path = match.group('path').rstrip('/')
+        remote_type = remote_path_type(user_host, remote_path)
+
+        if remote_type is None:
+            raise RuntimeError(f"无法确定远程路径类型：{dst}")
+
+        if os.path.isdir(src):
+            # 如果源是目录，则目标路径要确保是目录
+            if remote_type in ("directory", "link"):
+                final_dst = f"{user_host}:{remote_path}/"
+            elif remote_type == 'not_exists':
+                ensure_remote_dir(user_host, remote_path)
+                final_dst = f"{user_host}:{remote_path}/"
+            else:
+                raise RuntimeError(f"源是目录，目标不能是文件: {dst}")
+        else:  # 源是文件
+            bname = os.path.basename(src)
+            if remote_type == 'not_exists':
+                if dst.endswith('/') or os.path.splitext(remote_path)[1] == '':
+                    # 目标是目录
+                    target_dir = remote_path.rstrip('/')
+                    ensure_remote_dir(user_host, target_dir)
+                    final_dst = f"{user_host}:{target_dir}/{bname}"
+                else:
+                    parent_remote = os.path.dirname(remote_path)
+                    if parent_remote.strip('/') != "":  # 避免根目录
+                        ensure_remote_dir(user_host, parent_remote)
+                    final_dst = f"{user_host}:{remote_path}"
+            elif remote_type == 'directory':
+                final_dst = f"{user_host}:{remote_path}/{bname}"
+            else:
+                final_dst = f"{user_host}:{remote_path}"
+    else:
+        if os.path.isdir(src):
+            # 源是目录，目标路径要确保是目录
+            final_dst = dst.rstrip("/") + "/"
+            os.makedirs(final_dst, exist_ok=True)
+        else:
+            # 源是文件，目标路径判断
+            if dst.endswith('/') or os.path.splitext(dst)[1] == '':
+                dst = dst.rstrip('/')
+                final_dst = os.path.join(dst, os.path.basename(src))
+            else:
+                final_dst = dst
+            os.makedirs(os.path.dirname(final_dst), exist_ok=True)
+
+    # 构建 rsync 命令
+    cmd = ["rsync", "-a", "--atimes", src_path, final_dst]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=300
+        )
+        if result.returncode == 0:
+            return True
+
+        outerr = result.stderr.lower()
+
+        if "permission denied" in outerr or "rsync error" in outerr:
+            cmd_sudo = ["sudo"] + cmd
+            try:
+                result2 = subprocess.run(
+                    cmd_sudo,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=300
+                )
+                return result2.returncode == 0
+            except Exception:
+                pass
+        print("rsync 失败:", result.stderr.strip())
+        return False
+
+    except subprocess.TimeoutExpired:
+        print("rsync 执行超时")
+        return False
+    except FileNotFoundError:
+        print("未找到 rsync，回退到 shutil.copy2")
+        return fallback_copy(src, dst)
+    except Exception as e:
+        print(f"rsync 复制失败: {e}")
+        return False
+
+
+def fallback_copy(src: str, dst: str) -> bool:
+    """回退复制方案（使用 shutil.copy2，保留基本时间戳）"""
+    try:
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst, copy_function=shutil.copy2)
+        else:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+        return True
+    except Exception as e:
+        print(f"回退复制失败: {e}")
+        return False
+
+
+def copy_with_timestamps(src: str, dst: str) -> bool:
+    """统一接口：复制并保留时间戳"""
+    if os.name == 'nt':  # Windows 
+        return robocopy_copy(src, dst)
+    else:  # Unix/Linux/macOS
+        return rsync_copy(src, dst)
+    
+
+def copy_files_with_timestamps(source_note_dir, ignored_extensions=None):
+    """复制源目录中所有文件到目标，并保留原始时间戳"""
+    # try:
+    #     from copy_with_timestamps import copy_with_timestamps
+    # except ImportError:
+    #     logger.error("无法导入 copy_with_timestamps 模块，请确保模块存在。")
+    
+    ignored_extensions = ignored_extensions or []
+    for item in os.listdir(source_note_dir):
+        source_path = os.path.join(source_note_dir, item)
+        if item.startswith('.') and os.path.isfile(source_path):
+            # 隐藏文件复制时，不在复制命令的目标路径中指定文件
+            destination_path = os.path.join(target_note_dir)
+            # print("destination_path", destination_path)
+        else:
+            destination_path = os.path.join(target_note_dir, item)
+        
+        # 跳过忽略的文件类型
+        if any(source_path.endswith(ext) for ext in ignored_extensions):
+            continue
+        
+        if os.path.isdir(source_path):
+            copy_with_timestamps(source_path, destination_path)
+            logger.info(f"复制目录：{source_path} -> {destination_path}")
+        else:
+            copy_with_timestamps(source_path, destination_path)
+            logger.info(f"复制文件：{source_path} -> {destination_path}")
+
+
+# 匹配内联代码 和 多行代码块（反引号/波浪号，3个或以上）
+# 改进的正则：为每种情况设置捕获组，并确保内容被捕获
+CODE_PATTERN = re.compile(
+    r'(`[^`]+?`)'                                  # group 1: 内联代码
+    r'|(~{3,})([a-zA-Z][\w-]*)?\s*\n'              # group 2: 波浪号开始, group 3: 语言
+    r'([\s\S]*?)\n'                                # group 4: 波浪号内容
+    r'(~{3,})(?=\n|$)'                             # group 5: 波浪号结束
+    r'|(`{3,})([a-zA-Z][\w-]*)?\s*\n'              # group 6: 反引号开始, group 7: 语言
+    r'([\s\S]*?)\n'                                # group 8: 反引号内容
+    r'(`{3,})(?=\n|$)',                            # group 9: 反引号结束
     re.MULTILINE
 )
 
-# 匹配标准的 Markdown 超链接语法（包括图片链接）
-# 如 [描述](链接) 或 ![描述](链接)
-link_pattern = r'''
-    (!)?                    # 图片标识（可选）
-    \[                      # 开始括号 [
-    (                       # 捕获组：链接文本/图片描述
-        (?:                 # 非捕获组（处理尺寸或别名部分）
-            [^\]\|\n]*      # 除 ]、|、换行外的任意字符
-            (?:\|           # 分隔符 |（可选）
-                [^\]\n]*    # 除 ]、换行外的任意字符
-            )?              # 分隔符部分结束
-        )                   # 非捕获组结束
-    )                       # 捕获组结束
-    \]                      # 结束括号 ]
-    \(                      # 开始括号 (
-    (                       # 捕获组：URL/路径
-        (?:                 # 允许括号出现在URL中
-            [^()\n]         # 非括号字符
-            |               # 或
-            \([^()\n]*\)    # 成对的括号内容
-        )*                  # 重复多次
-        [^)\n]*             # 最后可以有一些非括号字符
-    )                       # URL捕获组结束
-    \)                      # 结束括号 )
-'''
 
-compiled_pattern = re.compile(link_pattern, re.VERBOSE)
+def save_code_blocks(content):
+    code_blocks = []
+    placeholder_counter = 0
+
+    def replace_func(match):
+        nonlocal placeholder_counter
+        placeholder_counter += 1
+        placeholder = f"__CODE_BLOCK_{placeholder_counter}__"
+
+        if match.group(1):  # 内联代码
+            code = match.group(1)
+        elif match.group(2):  # 波浪号代码块
+            start_delim = match.group(2)   # ~~~
+            lang = match.group(3) or ""    # 可选语言
+            body = match.group(4)
+            end_delim = match.group(5)     # ~~~
+            # 保留语言标识
+            code = f"{start_delim}{lang}\n{body}\n{end_delim}"
+        else:  # 反引号代码块
+            start_delim = match.group(6)   # ```
+            lang = match.group(7) or ""    # 可选语言
+            body = match.group(8)
+            end_delim = match.group(9)     # ```
+            # 保留语言标识
+            code = f"{start_delim}{lang}\n{body}\n{end_delim}"
+
+        code_blocks.append((placeholder, code))
+        return placeholder
+
+    new_content = CODE_PATTERN.sub(replace_func, content)
+    return new_content, code_blocks
 
 
-# 代码块匹配正则（同时匹配多行代码块和单行内联代码）
-code_pattern = re.compile(
-    r'(?s)(```.*?```|~~~.*?~~~|`[^`]+?`)',
-    re.DOTALL
-)
+def restore_code_blocks(content, code_blocks):
+    """
+    将占位符替换回原始代码块
+    """
+    for placeholder, code in code_blocks:
+        content = content.replace(placeholder, code)
+    return content
 
-# 全局资源缓存（避免重复查找）
-resource_cache = {}
+    
+# Wiki 链接正则（支持路径/标题/块/尺寸/别名，竖线前后可有空格）
+wiki_link_regex = r"""
+    (!?)                           # 1: 可选 "!"（embed）
+    \[\[
+        (?:([^\]\|\n#^]+?)\s*)?    # 2: 路径（可选，自动去掉尾空格）
+        (?:\#(?:
+            (?!\^)([^\]\|\n#^]+)   # 3: 标题（#xxx）
+          | \^([^\]\|\n#]+)        # 4: 块标识符（#^xxx）
+        ))?
+        (?:\s*\|\s*(\d{1,4}(?:x\d{1,4})?))?   # 5: 尺寸（400 或 400x300）
+        (?:\s*\|\s*([^\]\n|]+))?              # 6: 别名
+    \]\]
+"""
+
+# Markdown 链接正则（支持路径/标题/块/尺寸，描述去掉尾空格）
+markdown_link_regex = r"""
+    (!)?                           # 1: 可选 "!"（embed）
+    \[
+        ([^\]\|\n]*?)\s*           # 2: 描述/别名（去尾空格）
+        (?:\s*\|\s*
+            (\d{1,4}(?:x\d{1,4})?) # 3: 尺寸（400 或 400x300）
+        )?
+    \]
+    \(
+        ([^()\n#^]+?)?             # 4: 路径（可选）
+        (?:\#(?:
+            (?!\^)([^()\n#^]+)     # 5: 标题（#xxx）
+          | \^([^()\n#]+)          # 6: 块标识符（#^xxx）
+        ))?
+    \)
+"""
+
+wiki_link_pattern = re.compile(wiki_link_regex, re.VERBOSE)
+markdown_link_pattern = re.compile(markdown_link_regex, re.VERBOSE)
+
+
+# def is_image(path: str) -> bool:
+#     """判断是否为图片链接"""
+#     extensions_with_dot = tuple(f'.{ext}' for ext in IMAGE_EXT)
+#     return path.lower().endswith(extensions_with_dot)
+
+
+def parse_desc_size(raw_desc_or_size, size_group):
+    """解析图片描述和尺寸"""
+    if not size_group:
+        if raw_desc_or_size and re.match(r'^\d{1,4}(?:x\d{1,4})?$', raw_desc_or_size):
+            return None, raw_desc_or_size
+        return raw_desc_or_size, None
+
+    return raw_desc_or_size, size_group
+
+
+def extract_wiki_links(text):
+    """Obsidian Wiki 链接解析"""
+    matches = []
+    for match in wiki_link_pattern.finditer(text):
+        # isImage = is_image(match.group(2))
+        # if isImage:
+        #     print("image_path:", match.group(2))
+        full_match = match.group(0)
+        # print("full_match:", full_match)
+        embed = bool(match.group(1))
+        path = match.group(2)
+        title = match.group(3)
+        block_id = match.group(4)
+        desc = match.group(6)
+        size = match.group(5)
+        if desc and size:
+                desc = 'a' + desc + 'b'
+                size = 'c' + size + 'd'
+                
+        matches.append({
+            'full_match': full_match,
+            'type': 'wiki',
+            'embed': embed,
+            'path': path,
+            'title': title,
+            'block_id': block_id,
+            'desc': desc,
+            'size': size,
+            'start': match.start(),
+            'end': match.end(),
+        })
+
+    return matches
+
+
+def extract_markdown_links(text):
+    """Obsidian Markdown 链接解析"""
+    matches = []
+    for match in markdown_link_pattern.finditer(text):
+        # print("match.groups():", match.groups())
+        full_match = match.group(0)
+        embed = bool(match.group(1))
+        raw_desc_or_size = match.group(2)
+        size_group = match.group(3)
+        path = match.group(4)
+        desc, size = parse_desc_size(raw_desc_or_size, size_group)
+        title = match.group(5)
+        block_id = match.group(6)
+        
+        matches.append({
+            'full_match': full_match,
+            'type': 'markdown',
+            'embed': embed,
+            'path': path,
+            'title': title,
+            'block_id': block_id,
+            'desc': desc,
+            'size': size,
+            'start': match.start(),
+            'end': match.end(),
+        })
+
+    return matches
+
 
 def confirm_delete(path):
     """确认是否删除指定路径"""
@@ -122,14 +647,6 @@ def safe_remove_if_exists(path):
         print("❌ 已取消删除操作。") 
         sys.exit(1)  # 立即退出程序
 
-# 确认删除目标目录
-safe_remove_if_exists(target_note_dir)
-# safe_remove_if_exists(new_image_dir)
-
-# 创建新目录
-os.makedirs(target_note_dir, exist_ok=True)
-# os.makedirs(new_image_dir, exist_ok=True)
-
 
 def copy_files(source_note_dir, ignored_extensions=None):
     """复制源目录中的所有文件到目标目录"""
@@ -146,7 +663,6 @@ def copy_files(source_note_dir, ignored_extensions=None):
         # if item.startswith('.') or item in ['Thumbs.db', 'desktop.ini']:
         #     continue
 
-        remove_if_exists(destination_path)
         if os.path.isdir(source_path):
             shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
             logger.info(f"复制目录: {source_path} -> {destination_path}")
@@ -173,24 +689,6 @@ def get_ignore_list(target_dir):
     return ignored
 
 
-def iterate_files(target_note_dir):
-    """遍历目标目录中的所有笔记文件更新链接"""
-    ignored_dirs = get_ignore_list(target_note_dir)
-    updated_count = 0
-    for root, dirs, files in os.walk(target_note_dir):
-        # 排除特定子目录
-        dirs[:] = [d for d in dirs if d not in ignored_dirs]
-
-        for file in files:
-            if file.endswith('.md'):
-                note_file_path = os.path.join(root, file)
-                updated_count += 1
-                logger.info(f"处理笔记: {note_file_path}")
-                update_resource_links(note_file_path)
-                
-    return updated_count
-
-    
 def find_resource_file(source_dir, resource_path, current_note_dir):
     """
     在仓库中查找资源文件
@@ -277,95 +775,6 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
     resource_cache[cache_key] = None
     return None
 
-def get_file_type(file_path):
-    """根据文件扩展名获取文件类型"""
-    ext = file_path.split('.')[-1].lower() if '.' in file_path else ''
-    for file_type, extensions in supported_extensions.items():
-        if ext in extensions:
-            return file_type
-    return 'other'
-
-
-def save_code_blocks(content):
-    """
-    提取所有代码块和内联代码，并用占位符替代
-    """
-    # 提取所有代码块和内联代码
-    code_blocks = code_pattern.findall(content)
-    
-    # 用占位符替代代码块和内联代码
-    content = code_pattern.sub('__CODE_BLOCK__', content)
-
-    return content, code_blocks
-
-
-def restore_code_blocks(content, code_blocks):
-    """
-    按顺序将占位符替换回代码块和内联代码
-    """
-    for code_block in code_blocks:
-        content = content.replace('__CODE_BLOCK__', code_block, 1)
-    return content
-
-
-def encode_url_space_only(url):
-    """
-    仅对URL中的空格进行编码
-    """
-    return url.replace(" ", "%20")
-
-def decode_url_space_only(url):
-    """
-    仅对URL中的空格进行解码
-    """
-    return url.replace("%20", " ")
-
-
-def extract_resource_links(content):
-    """
-    提取笔记中资源的链接
-    """
-    matches = []
-    for match in compiled_pattern.finditer(content):
-        is_image = match.group(1) is not None
-        link_text = match.group(2)
-        url = match.group(3).strip()  # 去除首尾空格
-        url = decode_url_space_only(url)
-        size_info = None
-        alt_text = link_text
-        
-        if is_image:
-            if re.match(r'^\d+$', link_text):
-                width = link_text.split('x')
-                size_info = f"width={width}"
-                
-            elif re.match(r'^\d+x\d+$', link_text):
-                width, height = link_text.split('x')
-                size_info = f"width={width}, height={height}"
-                
-            elif '|' in link_text:
-                parts = link_text.split('|', 1)
-                alt_text = parts[0]
-                size_part = parts[1]
-                
-                if re.match(r'^\d+x\d+$', size_part):
-                    width, height = size_part.split('x')
-                    size_info = f"width={width}, height={height}"
-                elif re.match(r'^\d+$', size_part):
-                    size_info = f"width={size_part}"
-                    
-        match_info = {
-            'type': 'image' if is_image else 'link',
-            'full_match': match.group(0),
-            'text': alt_text,
-            'url': url,
-            'size': size_info,
-            'start': match.start(),
-            'end': match.end()
-        }
-        matches.append(match_info)
-        
-    return matches
 
 def is_web_link(link):
     """
@@ -399,89 +808,119 @@ def is_web_link(link):
     # 6. 其他情况视为本地链接
     return False
 
-def convert_obsidian_wiki_links(note_file_path, content):
+
+def get_file_type(file_path):
+    """根据文件扩展名获取文件类型"""
+    ext = file_path.split('.')[-1].lower() if '.' in file_path else ''
+    for file_type, extensions in supported_extensions.items():
+        if ext in extensions:
+            return file_type
+    return 'other'
+
+
+def encode_url_space_only(url):
     """
-    将 Obsidian 的 wiki 链接转换为标准 Markdown 链接格式
+    仅对URL中的空格进行编码
+    """
+    return url.replace(" ", "%20")
+
+def decode_url_space_only(url):
+    """
+    仅对URL中的空格进行解码
+    """
+    return url.replace("%20", " ")
+
+
+def convert_wiki_links(note_file_path, updated_content):
+    """
+    将文件中的 Obsidian Wiki 链接转换为 Markdown 超链接格式
+    :param note_file_path: 笔记文件路径
+    :param updated_content: 笔记内容
     """
     # 当前笔记所在目录
     current_note_dir = os.path.dirname(note_file_path)
+    
+    # 遍历所有匹配到的链接
+    matches = extract_wiki_links(updated_content)
+    
+    # print("matches:", matches)
+    # 按链接在文档中的位置排序
+    matches.sort(key=lambda m: m['start'])
+    
+    parts = []  # 用于存储处理后的内容片段
+    last_end = 0   # 记录上一次匹配结束的位置
+    
+    if matches:
+        for match in matches:
+            parts.append(updated_content[last_end:match['start']])
+            resource_path = match['path']
+            
+            if not resource_path:
+                resource_path = note_file_path
+                
+            resource_name = os.path.basename(resource_path)
+            resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
+            
+            if resource_relpath:
+                # 计算相对仓库根目录的路径
+                rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
+                # print('rel_path:', rel_path)
+                
+                # 计算外部链接
+                full_url = f'{external_link_prefix}{rel_path}'
+                
+                # 构建新的链接内容
+                if match['embed']:
+                    full_path = f'!['
+                else:
+                    full_path = f'['
+                if not match['desc'] and not match['size']:
+                    full_path += f'{resource_name}'
+                elif match['desc']:
+                    full_path += f'{match["desc"]}'
+                    if match['size']:
+                        full_path += f'|{match["size"]}'
+                else:
+                    full_path += f'{match["size"]}'
+                full_path += f']('
 
-    def replacement(match):
-        """处理正则表达式匹配的资源链接"""
-        full_match = match.group(0)  # 完整匹配
-        sign = match.group(1)  # 匹配开头的 !（可选）
-        resource_path = match.group(2)  # 资源路径（可能为空）
-        anchor = match.group(3) if match.group(3) else ''  # 锚点（可选）
-        alias_or_param = match.group(4) if match.group(4) else ''  # 别名或参数（可选）
-        width = match.group(5) if match.group(5) else ''  # 图片宽度（可选）
-        height = match.group(6) if match.group(6) else ''  # 图片高度（可选）
-        
-        # 形如：[[#标题|见上文]]，文件内上下文的链接
-        if not resource_path:
-            resource_path = note_file_path
-
-        resource_name = os.path.basename(resource_path)
-        resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
-
-        if not resource_relpath:
-            logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
-            logger.warning(f"📝 在笔记中: {note_file_path}")
-            logger.warning("⏩ 跳过此资源链接")
-            return full_match  # 保留原始链接
-
-        # 计算相对仓库根目录的路径
-        rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
-
-        # 生成外部链接格式
-        # encode_path = quote(rel_path, encoding='utf-8')
-        # external_link = f'{external_link_prefix}{rel_path}'
-        external_link = f'{rel_path}'
-
-        # 添加锚点（如果存在）
-        if anchor:
-            # encoded_anchor = quote(anchor, encoding='utf-8')
-            external_link += f'#{anchor}'
-        
-        # 对空格进行编码
-        external_link = encode_url_space_only(external_link)
-        
-        # 获取文件类型
-        file_type = get_file_type(resource_path)
-
-        # 根据文件类型构建不同的链接
-        if file_type == 'image':
-            # 图片处理：支持尺寸参数
-            alt_text = alias_or_param or resource_name
-            if width and height:
-                return f'<img src="{external_link}" width="{width}" height="{height}" alt="{alt_text}" />'
-            elif width:
-                return f'<img src="{external_link}" width="{width}" alt="{alt_text}" />'
-            elif height:
-                return f'<img src="{external_link}" height="{height}" alt="{alt_text}" />'
+                if match['title'] and not match['block_id']:
+                    full_url += f'#{match["title"]}'
+                if (not match['title']) and match['block_id']:
+                    full_url += f'#^{match["block_id"]}'
+                full_url = decode_url_space_only(full_url)
+                full_url = encode_url_space_only(full_url)
+                full_path += full_url + ')'
             else:
-                return f'![{alt_text}]({external_link})'
-        else:
-            # 其他文件类型处理：支持别名
-            display_text = alias_or_param or anchor or resource_name
-            if full_match.startswith('!'):
-                return f'![{display_text}]({external_link})'
-            return f'[{display_text}]({external_link})'
+                full_path = match['full_match']
+                logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
+                logger.warning(f"📝 在笔记中: {note_file_path}")
+                logger.warning(f"⏩ 此资源链接：{full_path}")
+ 
+            # 添加匹配到的链接到内容片段
+            parts.append(full_path)
+            last_end = match['end']  # 更新上次处理结束位置
 
-    # 使用正则表达式替换资源链接
-    updated_content = link_regex.sub(replacement, content)
-    
+        # 添加最后一个片段
+        parts.append(updated_content[last_end:])
+
+        # 将所有片段重新组合成新的内容
+        updated_content = ''.join(parts)
+
+        return updated_content 
+
     return updated_content
-    
 
-def convert_standard_markdown_links(note_file_path, content):
+
+def convert_markdown_links(note_file_path, updated_content):
     """
-    将标准 Markdown 链接转换为 Web 可访问的外部链接格式
+    将 Markdown 链接转换为 Web 可访问的外部链接格式
     """
     # 当前笔记所在目录
     current_note_dir = os.path.dirname(note_file_path)
     
     # 提取所有资源链接和图片匹配项
-    matches = extract_resource_links(content)
+    matches = extract_markdown_links(updated_content)
     
     # 按起始位置正向排序
     matches.sort(key=lambda m: m['start'])
@@ -490,93 +929,105 @@ def convert_standard_markdown_links(note_file_path, content):
     parts = []
     last_end = 0  # 记录上次处理结束位置
     
-    for match in matches:
-        full_match = match['full_match']  # 完整匹配
-        type = match['type']  # 链接类型（link 或 image）
-        text = match['text']  # 链接文本
-        url = match['url']  # 链接地址
-        size = match['size']  # 尺寸信息
-        start = match['start']  # 起始位置
-        end = match['end']  # 结束位置
-        
-        # 添加匹配前的文本
-        parts.append(content[last_end:start])
-        
-        # 默认保留原始链接
-        replacement_str = full_match
-        
-        # 处理本地资源链接
-        if not is_web_link(url):
-            resource_relpath = None
-            anchor = None
-            
-            # 本地可能存在非图片格式：![alt text](file://path/to/file#anchor)
-            # 处理内部锚点链接
-            if url.startswith('#'):
-                anchor = url[1:]
-                resource_path = note_file_path
-                resource_name = os.path.basename(resource_path)
-                # 使用当前笔记目录计算相对路径
-                resource_relpath = os.path.relpath(resource_path, target_note_dir)
-            else:  
-                # 处理带锚点的文件链接
-                if '#' in url:
-                    url_parts = url.split('#', 1)
-                    resource_path = url_parts[0]
-                    anchor = url_parts[1]
-                # 处理普通文件链接
+    if matches: 
+        for match in matches:
+            type = match['type']
+            embed = match['embed']
+            resource_path = match['path']
+            title = match['title']
+            block_id = match['block_id']
+            desc = match['desc']
+            size = match['size']
+            if size:
+                if 'x' in size:
+                    width, height = size.split('x')[0], size.split('x')[1]
                 else:
-                    resource_path = url
-                
-                resource_name = os.path.basename(resource_path)
+                    width, height = size, None
+            else:
+                width, height = None, None
+            
+            # 添加匹配前的文本
+            parts.append(updated_content[last_end:match['start']])
 
+            if not resource_path:
+                resource_path = note_file_path
+
+            # 处理本地资源链接
+            if not is_web_link(resource_path):
+                resource_path = decode_url_space_only(resource_path)
+                resource_name = os.path.basename(resource_path)
+                
                 # 查找资源文件的相对路径
                 resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
-            
-            # 如果找到资源，生成外部链接格式
-            if resource_relpath:
-                # 计算相对仓库根目录的路径
-                rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
                 
-                # 计算外部链接
-                extended_link = f'{external_link_prefix}{rel_path}'
-                
-                # 对空格进行编码
-                extended_link = encode_url_space_only(extended_link)
-                
-                # 添加锚点（如果存在）
-                if anchor:
-                    encoded_anchor = encode_url_space_only(anchor)
-                    extended_link += f'#{encoded_anchor}'
-                
-                # 构建外部链接形式
-                if type == 'link':
-                    display_text = text or anchor or resource_name
-                    replacement_str = f'[{display_text}]({extended_link})'  
-                
-                elif type == 'image':
-                    alt_text = text or resource_name
-                    if size:
-                        replacement_str = f'<img src="{extended_link}" {size} alt="{alt_text}" />'
+                # 如果找到资源，生成外部链接格式
+                if resource_relpath:
+                    # 计算相对仓库根目录的路径
+                    rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
+                    
+                    # 计算外部链接
+                    full_url = f'{external_link_prefix}{rel_path}'
+                    
+                    if match['title'] and not match['block_id']:
+                        full_url += f'#{match["title"]}'
+                    # if (not match['title']) and match['block_id']:
+                    #     full_url += f'#^{match["block_id"]}'
+                    full_url = decode_url_space_only(full_url)
+                    full_url = encode_url_space_only(full_url)
+                        
+                    file_type = get_file_type(resource_name)
+                    
+                    if file_type == 'image':
+                        alt_text = desc or resource_name
+                        alt_text = decode_url_space_only(alt_text)
+                        if embed:
+                            # 生成嵌入式图片的 HTML
+                            if width and height:
+                                full_path = f'<img src="{full_url}" width="{width}" height="{height}" alt="{alt_text}" />'
+                            elif width:
+                                full_path = f'<img src="{full_url}" width="{width}" alt="{alt_text}" />'
+                            elif height:
+                                full_path = f'<img src="{full_url}" height="{height}" alt="{alt_text}" />'
+                            else:
+                                full_path = f'<img src="{full_url}" alt="{alt_text}" />'
+                        else:
+                            # 生成图片的 Markdown 链接
+                            if width and height:
+                                full_path = f'[{alt_text}|{width}x{height}]({full_url})'
+                            elif width:
+                                full_path = f'[{alt_text}|{width}]({full_url})'
+                            elif height:
+                                full_path = f'[{alt_text}|{height}]({full_url})'
+                            else:
+                                full_path = f'[{alt_text}]({full_url})'     
                     else:
-                        replacement_str = f'![{alt_text}]({extended_link})'
-                
+                        # 生成其他文件的 Markdown 链接
+                        display_text = desc or title or block_id or resource_name
+                        display_text = decode_url_space_only(display_text)
+                        if embed:
+                            full_path = f'![{display_text}]({full_url})'
+                        full_path = f'[{display_text}]({full_url})'
+                else:
+                    full_path = match['full_match']
+                    logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
+                    logger.warning(f"📝 在笔记中: {note_file_path}")
+                    logger.warning(f"⏩ 保留原始链接：{full_path}")
+            
             else:
-                logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
-                logger.warning(f"📝 在笔记中: {note_file_path}")
-                logger.warning("⏩ 保留原始链接")
+                full_path = match['full_match']
  
-        # 添加替换后的内容
-        parts.append(replacement_str)
-        last_end = end  # 更新上次处理结束位置
+            # 添加匹配到的链接到内容片段
+            parts.append(full_path)
+            last_end = match['end']
+            
+        # 添加最后一个片段
+        parts.append(updated_content[last_end:])
         
-    # 添加最后一段文本
-    parts.append(content[last_end:])
-    
-    # 拼接所有部分
-    updated_content = ''.join(parts)
+        # 拼接所有部分
+        updated_content = ''.join(parts)
     
     return updated_content
+
 
 def update_resource_links(note_file_path):
     """
@@ -584,33 +1035,69 @@ def update_resource_links(note_file_path):
     :param note_file_path: 笔记文件路径
     """
     with open(note_file_path, 'r', encoding='utf-8', newline='') as file:
-        content = file.read()
+        try:
+            content = file.read()
+            # print("content[:100]:", content[:100])  # 打印前100个字符作为测试
+        except IOError as e:
+            print(f"IOError: {e}")
+        except UnicodeDecodeError as e:
+            print(f"UnicodeDecodeError: {e}")
+        except Exception as e:
+            print(f"Unexpected error: {e}")
 
     # 提取代码内容并用占位符替换
     updated_content, code_blocks = save_code_blocks(content)
     
-    # 转换为标准 Markdown 链接格式
-    updated_content = convert_obsidian_wiki_links(note_file_path, updated_content)
+    # 转换为 Markdown 链接格式
+    updated_content = convert_wiki_links(note_file_path, updated_content)
     
     # 转换为 Web 可访问的外部链接格式
-    updated_content = convert_standard_markdown_links(note_file_path, updated_content)
+    updated_content = convert_markdown_links(note_file_path, updated_content)
     
     # 恢复代码块
     updated_content = restore_code_blocks(updated_content, code_blocks)
 
     with open(note_file_path, 'w', encoding='utf-8', newline='') as file:
-        file.write(updated_content)
+        try:
+            file.write(updated_content)
+            # print(f"✅ 成功更新文件: {note_file_path}")
+        except Exception as e:
+            logger.error(f"⚠️ 写入文件时发生错误:{e}")
+
+
+def iterate_files(target_note_dir):
+    """遍历目标目录中的所有笔记文件更新链接"""
+    ignored_dirs = get_ignore_list(target_note_dir)
+    updated_count = 0
+    for root, dirs, files in os.walk(target_note_dir):
+        # 排除特定子目录
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+
+        for file in files:
+            if file.endswith('.md'):
+                note_file_path = os.path.join(root, file)
+                updated_count += 1
+                logger.info(f"处理笔记: {note_file_path}")
+                update_resource_links(note_file_path)
+                
+    return updated_count
 
 
 def main():
     """执行文件复制和更新操作"""
+    # 确认删除目标目录
+    safe_remove_if_exists(target_note_dir)
+    # 创建新目录
+    os.makedirs(target_note_dir, exist_ok=True)
+
     logger.info("开始处理...")
     logger.info(f"源目录: {source_note_dir}")
     logger.info(f"目标目录: {target_note_dir}")
 
     # 复制文件（忽略特定扩展名）
     ignored_extensions = ['.tmp', '.DS_Store']
-    copy_files(source_note_dir, ignored_extensions)
+    # copy_files(source_note_dir, ignored_extensions)
+    copy_files_with_timestamps(source_note_dir, ignored_extensions)
 
     # 更新笔记中的资源链接
     updated_count = iterate_files(target_note_dir)

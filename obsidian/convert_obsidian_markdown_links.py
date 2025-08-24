@@ -1,33 +1,9 @@
 """
 需求：
 
-将 Obsidian 笔记中的内部链接格式转换为 Markdown 链接格式
+将 Markdown 文件中引用的本地资源路径（如图片、文件）自动转换为可通过 Web 访问的外部 URL 格式
 
-处理 Obsidian 文档中的内部链接格式范围：
-
-1. Obsidian 支持的 Wiki 链接格式
-
-- 当前文件内锚点链接：`[[#标题]]`     
-- 当前文件内块标识符链接：`[[#^块标识符]]`
-- 普通文件链接：`[[assets/file1.md]]`
-- 支持文件带锚点：`[[assets/file2.md#标题]]`
-- 支持文件带块标识符：`[[assets/file3.md#^块标识符]]`
-- 支持文件带别名：`[[assets/file4.md|别名]]`
-- 支持文件带锚点和别名：`[[assets/file5.md#标题|别名]]`
-- 支持文件带块标识符和别名：`[[assets/file6.md#^块标识符|别名]]`
-- 图片资源链接：`![[assets/image1.png]]`
-- 支持图片带尺寸声明：`![[assets/image2.png | 400x300]]`
-- 支持图片仅指定宽度：`![[assets/image3.png | 400]]`
-
-2. Obsidian 特殊嵌入格式
-
-- 当前文件内锚点嵌入：`![[#标题]]`
-- 当前文件内块标识符嵌入：`![[#^块标识符]]`
-- 嵌入文件内容：`![[assets/file10.md]]`
-- 嵌入 PDF 页面指定页数：`![[assets/doc.pdf#page=3]]`
-
-
-转换后的 Markdown 链接格式：
+处理 Obsidian Markdown 链接格式：
 
 1. 标准 Markdown 链接格式
 
@@ -47,11 +23,18 @@
 - 支持图片带描述和尺寸声明：`![描述 | 400x300](assets/image7.png)`
 - 支持图片带描述和仅宽度声明：`![描述 | 400](assets/image8.png)`
 
+处理说明:
+
+- 将所有本地资源路径转换为外部 URL 格式，并保留原始链接的别名和描述。
+- 嵌入图片链接，生成嵌入式图片的 HTML，可保留原始链接的描述和尺寸声明。
+- 非嵌入图片链接，生成图片的 Markdown 链接，可保留原始链接的描述。
+- 普通文件链接，生成文件的 Markdown 链接，可保留原始链接的锚点标题和别名，但不保留块标识符。
+
 """
 import os
 import shutil
 import re
-from urllib.parse import urlparse, unquote, quote
+from urllib.parse import quote
 import sys
 from pathlib import Path
 import logging
@@ -61,12 +44,12 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger('ObsidianLinkConverter')
 
 # 配置路径
-source_folder = "Default"
-source_note_dir = fr'D:\Obsidian\Middle\Default'
-target_note_dir = fr'D:\Obsidian\Middle\wikiformat'
-external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'
-# external_link_prefix = '/'  # 前缀添加 / 生成绝对路径，拼接 GitHub 仓库地址便于 Web 访问
-# external_link_prefix = ''
+source_folder = "Default"  # 源目录名称
+source_note_dir = fr'D:\Obsidian\Middle\Default'  # 源目录路径
+target_note_dir = fr'D:\Obsidian\Middle\markdownformat'  # 目标目录路径
+external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'  # GitHub 原始链接前缀
+# external_link_prefix = r''
+
 
 # 定义所有支持的文件类型（扩展列表）
 supported_extensions = {
@@ -81,8 +64,7 @@ supported_extensions = {
 all_extensions = []
 for category in supported_extensions.values():
     all_extensions.extend(category)
-extensions_pattern = '|'.join(all_extensions)
-
+    
 # 全局资源缓存（避免重复查找）
 resource_cache = {}
 
@@ -143,21 +125,31 @@ def restore_code_blocks(content, code_blocks):
     return content
 
 
-# Wiki 链接正则（支持路径/标题/块/尺寸/别名，竖线前后可有空格）
-wiki_link_regex = r"""
-    (!?)                           # 1: 可选 "!"（embed）
-    \[\[
-        (?:([^\]\|\n#^]+?)\s*)?    # 2: 路径（可选，自动去掉尾空格）
+# Markdown 链接正则（支持路径/标题/块/尺寸，描述去掉尾空格）
+markdown_link_regex = r"""
+    (!)?                           # 1: 可选 "!"（embed）
+    \[
+        ([^\]\|\n]*?)\s*           # 2: 描述/别名（去尾空格）
+        (?:\s*\|\s*
+            (\d{1,4}(?:x\d{1,4})?) # 3: 尺寸（400 或 400x300）
+        )?
+    \]
+    \(
+        ([^()\n#^]+?)?             # 4: 路径（可选）
         (?:\#(?:
-            (?!\^)([^\]\|\n#^]+)   # 3: 标题（#xxx）
-          | \^([^\]\|\n#]+)        # 4: 块标识符（#^xxx）
+            (?!\^)([^()\n#^]+)     # 5: 标题（#xxx）
+          | \^([^()\n#]+)          # 6: 块标识符（#^xxx）
         ))?
-        (?:\s*\|\s*(\d{1,4}(?:x\d{1,4})?))?   # 5: 尺寸（400 或 400x300）
-        (?:\s*\|\s*([^\]\n|]+))?              # 6: 别名
-    \]\]
+    \)
 """
 
-wiki_link_pattern = re.compile(wiki_link_regex, re.VERBOSE)
+markdown_link_pattern = re.compile(markdown_link_regex, re.VERBOSE)
+
+
+# def is_image(path: str) -> bool:
+#     """判断是否为图片链接"""
+#     extensions_with_dot = tuple(f'.{ext}' for ext in IMAGE_EXT)
+#     return path.lower().endswith(extensions_with_dot)
 
 
 def parse_desc_size(raw_desc_or_size, size_group):
@@ -170,56 +162,23 @@ def parse_desc_size(raw_desc_or_size, size_group):
     return raw_desc_or_size, size_group
 
 
-def is_web_link(link):
-    """
-    判断链接是否为网页链接
-    """
-    # 1. 如果以http://或https://开头
-    if link.startswith(('http://', 'https://')):
-        return True
-
-    # 2. 常见网络协议
-    if link.startswith(('ftp://', 'mailto:', 'tel:')):
-        return True
-
-    # 3. 标准URL格式（带域名）
-    domain_pattern = re.compile(
-        r'^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}'  # 域名
-        r'(?::\d+)?'  # 端口
-        r'(?:/[^\s]*)?$'  # 路径
-    )
-    if domain_pattern.match(link):
-        return True
-
-    # 4. 协议相对URL（视为外部链接）
-    if link.startswith('//'):
-        return True
-
-    # 5. 本地网络地址（视为本地链接）
-    if 'localhost' in link.lower() or '127.0.0.1' in link.lower():
-        return False
-
-    # 6. 其他情况视为本地链接
-    return False
-
-
-def extract_wiki_links(text):
-    """Obsidian Wiki 链接解析"""
+def extract_markdown_links(text):
+    """Obsidian Markdown 链接解析"""
     matches = []
-    for match in wiki_link_pattern.finditer(text):
-        path = match.group(2) or None
-        # isImage = path and is_image(match.group(2))
-        # print("image_path:", match.group(2))
+    for match in markdown_link_pattern.finditer(text):
+        # print("match.groups():", match.groups())
         full_match = match.group(0)
         embed = bool(match.group(1))
-        title = match.group(3)
-        block_id = match.group(4)
-        desc = match.group(6)
-        size = match.group(5)
-
+        raw_desc_or_size = match.group(2)
+        size_group = match.group(3)
+        path = match.group(4)
+        desc, size = parse_desc_size(raw_desc_or_size, size_group)
+        title = match.group(5)
+        block_id = match.group(6)
+        
         matches.append({
             'full_match': full_match,
-            'type': 'wiki',
+            'type': 'markdown',
             'embed': embed,
             'path': path,
             'title': title,
@@ -229,7 +188,7 @@ def extract_wiki_links(text):
             'start': match.start(),
             'end': match.end(),
         })
-            
+
     return matches
 
 
@@ -252,7 +211,7 @@ def safe_remove_if_exists(path):
     if confirm_delete(path):
         remove_if_exists(path)
     else:
-        print("❌ 已取消删除操作。")  
+        print("❌ 已取消删除操作。") 
         sys.exit(1)  # 立即退出程序
 
 
@@ -271,6 +230,7 @@ def copy_files(source_note_dir, ignored_extensions=None):
         # if item.startswith('.') or item in ['Thumbs.db', 'desktop.ini']:
         #     continue
 
+        remove_if_exists(destination_path)
         if os.path.isdir(source_path):
             shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
             logger.info(f"复制目录: {source_path} -> {destination_path}")
@@ -300,7 +260,6 @@ def copy_files_with_timestamps(source_note_dir, ignored_extensions=None):
         if any(source_path.endswith(ext) for ext in ignored_extensions):
             continue
         
-        # remove_if_exists(destination_path)
         if os.path.isdir(source_path):
             copy_with_timestamps(source_path, destination_path)
             logger.info(f"复制目录：{source_path} -> {destination_path}")
@@ -329,7 +288,7 @@ def get_ignore_list(target_dir):
 
 def find_resource_file(source_dir, resource_path, current_note_dir):
     """
-    在仓库中查找资源文件，支持各种相对路径格式
+    在仓库中查找资源文件
     :param source_dir: 仓库根目录
     :param resource_path: 资源路径（可能包含相对路径）
     :param current_note_dir: 当前笔记所在目录
@@ -414,6 +373,39 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
     return None
 
 
+def is_web_link(link):
+    """
+    判断链接是否为网页链接
+    """
+    # 1. 如果以http://或https://开头
+    if link.startswith(('http://', 'https://')):
+        return True
+    
+    # 2. 常见网络协议
+    if link.startswith(('ftp://', 'mailto:', 'tel:')):
+        return True
+    
+    # 3. 标准URL格式（带域名）
+    domain_pattern = re.compile(
+        r'^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}'  # 域名
+        r'(?::\d+)?'  # 端口
+        r'(?:/[^\s]*)?$'  # 路径
+    )
+    if domain_pattern.match(link):
+        return True
+    
+    # 4. 协议相对URL（视为外部链接）
+    if link.startswith('//'):
+        return True
+    
+    # 5. 本地网络地址（视为本地链接）
+    if 'localhost' in link.lower() or '127.0.0.1' in link.lower():
+        return False
+    
+    # 6. 其他情况视为本地链接
+    return False
+
+
 def get_file_type(file_path):
     """根据文件扩展名获取文件类型"""
     ext = file_path.split('.')[-1].lower() if '.' in file_path else ''
@@ -436,116 +428,145 @@ def decode_url_space_only(url):
     return url.replace("%20", " ")
 
 
-def convert_wiki_links(note_file_path, updated_content):
+def convert_markdown_links(note_file_path, updated_content):
     """
-    将文件中的 Obsidian Wiki 链接转换为 Markdown 超链接格式
-    :param note_file_path: 笔记文件路径
-    :param updated_content: 笔记内容
+    将 Markdown 链接转换为 Web 可访问的外部链接格式
     """
     # 当前笔记所在目录
     current_note_dir = os.path.dirname(note_file_path)
     
-    # 遍历所有匹配到的链接
-    matches = extract_wiki_links(updated_content)
+    # 提取所有资源链接和图片匹配项
+    matches = extract_markdown_links(updated_content)
     
-    # print("matches:", matches)
-    # 按链接在文档中的位置排序
+    # 按起始位置正向排序
     matches.sort(key=lambda m: m['start'])
     
-    parts = []  # 用于存储处理后的内容片段
-    last_end = 0   # 记录上一次匹配结束的位置
+    # 使用列表拼接构建新内容
+    parts = []
+    last_end = 0  # 记录上次处理结束位置
     
-    if matches:
+    if matches: 
         for match in matches:
-            parts.append(updated_content[last_end:match['start']])
+            type = match['type']
+            embed = match['embed']
             resource_path = match['path']
- 
+            title = match['title']
+            block_id = match['block_id']
+            desc = match['desc']
+            size = match['size']
+            if size:
+                if 'x' in size:
+                    width, height = size.split('x')[0], size.split('x')[1]
+                else:
+                    width, height = size, None
+            else:
+                width, height = None, None
+            
+            # 添加匹配前的文本
+            parts.append(updated_content[last_end:match['start']])
+                        
             if not resource_path:
                 resource_path = note_file_path
+            
+            # 处理本地资源链接
+            if not is_web_link(resource_path):
+                resource_path = decode_url_space_only(resource_path)
+                resource_name = os.path.basename(resource_path)
                 
-            resource_name = os.path.basename(resource_path)
-            resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
-              
-            if resource_relpath:
-                # 计算相对仓库根目录的路径
-                rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
-                # print('rel_path:', rel_path)
+                # 查找资源文件的相对路径
+                resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
                 
-                # 计算外部链接
-                full_url = f'{external_link_prefix}{rel_path}'
-                
-                if match['embed']:
-                    full_path = f'!['
+                # 如果找到资源，生成外部链接格式
+                if resource_relpath:
+                    # 计算相对仓库根目录的路径
+                    rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
+                    
+                    # 计算外部链接
+                    full_url = f'{external_link_prefix}{rel_path}'
+                    
+                    if match['title'] and not match['block_id']:
+                        full_url += f'#{match["title"]}'
+                    # if (not match['title']) and match['block_id']:
+                    #     full_url += f'#^{match["block_id"]}'
+                    full_url = decode_url_space_only(full_url)
+                    full_url = encode_url_space_only(full_url)
+                        
+                    file_type = get_file_type(resource_name)
+                    
+                    if file_type == 'image':
+                        alt_text = desc or resource_name
+                        alt_text = decode_url_space_only(alt_text)
+                        if embed:
+                            # 生成嵌入式图片的 HTML
+                            if width and height:
+                                full_path = f'<img src="{full_url}" width="{width}" height="{height}" alt="{alt_text}" />'
+                            elif width:
+                                full_path = f'<img src="{full_url}" width="{width}" alt="{alt_text}" />'
+                            elif height:
+                                full_path = f'<img src="{full_url}" height="{height}" alt="{alt_text}" />'
+                            else:
+                                full_path = f'<img src="{full_url}" alt="{alt_text}" />'
+                        else:
+                            # 生成图片的 Markdown 链接
+                            if width and height:
+                                full_path = f'[{alt_text}|{width}x{height}]({full_url})'
+                            elif width:
+                                full_path = f'[{alt_text}|{width}]({full_url})'
+                            elif height:
+                                full_path = f'[{alt_text}|{height}]({full_url})'
+                            else:
+                                full_path = f'[{alt_text}]({full_url})'     
+                    else:
+                        # 生成其他文件的 Markdown 链接
+                        display_text = desc or title or block_id or resource_name
+                        display_text = decode_url_space_only(display_text)
+                        if embed:
+                            full_path = f'![{display_text}]({full_url})'
+                        full_path = f'[{display_text}]({full_url})'
                 else:
-                    full_path = f'['
-                if not match['desc'] and not match['size']:
-                    full_path += f'{resource_name}'
-                elif match['desc']:
-                    full_path += f'{match["desc"]}'
-                    if match['size']:
-                        full_path += f'|{match["size"]}'
-                else:
-                    full_path += f'{match["size"]}'
-                full_path += f']('
-                
-                if match['title'] and not match['block_id']:
-                    full_url += f'#{match["title"]}'
-                if (not match['title']) and match['block_id']:
-                    full_url += f'#^{match["block_id"]}'
-                full_url = decode_url_space_only(full_url)
-                full_url = encode_url_space_only(full_url)
-                full_path += full_url + ')'   
+                    full_path = match['full_match']
+                    logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
+                    logger.warning(f"📝 在笔记中: {note_file_path}")
+                    logger.warning(f"⏩ 保留原始链接：{full_path}")
+            
             else:
                 full_path = match['full_match']
-                logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
-                logger.warning(f"📝 在笔记中: {note_file_path}")
-                logger.warning(f"⏩ 此资源链接：{full_path}")
-            
+ 
             # 添加匹配到的链接到内容片段
             parts.append(full_path)
-            last_end = match['end']  # 更新上次处理结束位置
-
+            last_end = match['end']
+            
         # 添加最后一个片段
         parts.append(updated_content[last_end:])
-
-        # 将所有片段重新组合成新的内容
+        
+        # 拼接所有部分
         updated_content = ''.join(parts)
-
-        return updated_content 
     
     return updated_content
 
-
 def update_resource_links(note_file_path):
     """
-    更新文件中的资源链接为 Markdown 超链接格式
+    更新文件中的资源链接为外部访问链接
     :param note_file_path: 笔记文件路径
     """
     with open(note_file_path, 'r', encoding='utf-8', newline='') as file:
-        try:
-            content = file.read()
-        except IOError as e:
-            print(f"IOError: {e}")
-        except UnicodeDecodeError as e:
-            print(f"Unicode")
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-        
-    # 提取代码块并用占位符替换
+        content = file.read()
+
+    # 提取代码内容并用占位符替换
     updated_content, code_blocks = save_code_blocks(content)
     
-    # 提取所有资源链接转换为 Markdown 超链接
-    updated_content = convert_wiki_links(note_file_path, updated_content)
+    # 转换为 Web 可访问的外部链接格式
+    updated_content = convert_markdown_links(note_file_path, updated_content)
     
     # 恢复代码块
     updated_content = restore_code_blocks(updated_content, code_blocks)
-    
+
     with open(note_file_path, 'w', encoding='utf-8', newline='') as file:
         try:
             file.write(updated_content)
         except Exception as e:
             logger.error(f"Error writing to file: {e}")
-    
+
 
 def iterate_files(target_note_dir):
     """遍历目标目录中的所有笔记文件更新链接"""
@@ -571,7 +592,7 @@ def main():
     safe_remove_if_exists(target_note_dir)
     # 创建新目录
     os.makedirs(target_note_dir, exist_ok=True)
-    
+
     logger.info("开始处理...")
     logger.info(f"源目录: {source_note_dir}")
     logger.info(f"目标目录: {target_note_dir}")
