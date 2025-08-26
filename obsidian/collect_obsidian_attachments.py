@@ -1,5 +1,5 @@
 """
-需求：将所有图片汇总到一个新目录，以便后续上传到图床。
+需求：将所有附件资源汇总到一个新目录，以便后续上传到图床。
 """
 import os
 import shutil
@@ -14,10 +14,10 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger('ObsidianLinkConverter')
 
 # 配置路径
-source_folder = "Middle\Default"
+source_folder = "Default"
 source_note_dir = fr'D:\Obsidian\{source_folder}'
-new_image_dir = fr'D:\Obsidian\Middle\linkres'
-new_image_subfolder = "obsidian"
+new_resource_dir = fr'D:\Obsidian\Middle\linkres'
+new_resource_subfolder = "obsidian"
 
 
 # Obsidian 支持的文件格式
@@ -56,12 +56,6 @@ def safe_remove_if_exists(path):
         print("❌ 已取消删除操作。")  
         sys.exit(1)  # 立即退出程序
 
-# 确认删除目标目录
-safe_remove_if_exists(new_image_dir)
-
-# 创建新目录
-os.makedirs(new_image_dir, exist_ok=True)
-
 
 def get_file_type(file_path):
     """根据文件扩展名获取文件类型"""
@@ -88,43 +82,15 @@ def get_ignore_list(target_dir):
                     stripped_line = stripped_line[:-1]
                 ignored.append(stripped_line)
     return ignored
-
-
-def copy_image_files(source_dir, target_dir):
-    """
-    复制所有资源文件到目标目录
-    :param source_dir: 源目录
-    :param target_dir: 目标目录
-    """
-    remove_if_exists(target_dir)
-    os.makedirs(target_dir, exist_ok=True)
-
-    ignored_dirs = get_ignore_list(source_dir)
-    copied_count = 0
-
-    for root, dirs, files in os.walk(source_dir):
-        # 排除特定子目录
-        dirs[:] = [d for d in dirs if d not in ignored_dirs]
-
-        for file in files:
-            file_type = get_file_type(file)
-            if file_type == 'image':
-                source_file_path = os.path.join(root, file)
-                target_file_path = os.path.join(target_dir, file)
-                shutil.copy2(source_file_path, target_file_path)
-                copied_count += 1
-
-    logger.info(f"共复制 {copied_count} 个资源文件")
     
     
-def copy_image_files_with_timestamps(source_dir, target_dir):
-    """复制图片文件，并保留原始时间戳"""
+def copy_attachments_with_timestamps(source_dir, target_dir):
+    """复制附件资源，并保留原始时间戳"""
     try:
         from copy_with_timestamps import copy_with_timestamps
     except ImportError:
         logger.error("无法导入 copy_with_timestamps 模块，请确保模块存在。")
     
-    remove_if_exists(target_dir)
     os.makedirs(target_dir, exist_ok=True)
 
     ignored_dirs = get_ignore_list(source_dir)
@@ -136,7 +102,7 @@ def copy_image_files_with_timestamps(source_dir, target_dir):
 
         for file in files:
             file_type = get_file_type(file)
-            if file_type == 'image':
+            if file_type != 'markdown' and file_type != 'other':
                 source_file_path = os.path.join(root, file)
                 target_file_path = os.path.join(target_dir, file)
                 copy_with_timestamps(source_file_path, target_file_path)
@@ -146,18 +112,21 @@ def copy_image_files_with_timestamps(source_dir, target_dir):
     
     
 def main():
+    # 确认删除目标目录
+    safe_remove_if_exists(new_resource_dir)
+    # 创建新目录
+    os.makedirs(new_resource_dir, exist_ok=True)
+
     logger.info("开始处理...")
     logger.info(f"源目录: {source_note_dir}")
     # logger.info(f"目标目录: {target_note_dir}")
-    logger.info(f"图片汇总目录: {os.path.join(new_image_dir, new_image_subfolder)}")
+    logger.info(f"附件资源汇总目录: {os.path.join(new_resource_dir, new_resource_subfolder)}")
 
-    # 汇总图片资源
-    target_resource_dir = os.path.join(new_image_dir, new_image_subfolder)
-    # copy_image_files(source_note_dir, target_resource_dir)
-    copy_image_files_with_timestamps(source_note_dir, target_resource_dir)
+    # 汇总资源
+    target_resource_dir = os.path.join(new_resource_dir, new_resource_subfolder)
+    copy_attachments_with_timestamps(source_note_dir, target_resource_dir)
 
     logger.info("\n✅ 处理完成！")
-    # logger.info(f"笔记已处理: {target_note_dir}")
     logger.info(f"资源文件已汇总: {target_resource_dir}")
 
 

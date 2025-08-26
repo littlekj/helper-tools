@@ -77,19 +77,21 @@ logger = logging.getLogger('ObsidianLinkConverter')
 
 # 配置路径
 source_folder = "Default"
-source_note_dir = fr'D:\Obsidian\Middle\Default'
+source_note_dir = fr'D:\Obsidian\Default'
 target_note_dir = fr'D:\Obsidian\Middle\obsidianlinks'
+internal_link_prefix = r''  # 内部链接前缀
+# external_link_prefix = r''  # 外部链接前缀
 # external_link_prefix = r'https://raw.githubusercontent.com/littlekj/linkres/master/obsidian/'
 external_link_prefix = '/'  # 相对地址前缀添加 / 生成绝对路径，拼接 GitHub 仓库地址便于 Web 访问
-# external_link_prefix = ''
 
-# 定义所有支持的文件类型（扩展列表）
+
+# Obsidian 支持的文件格式
 supported_extensions = {
-    'image': ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'svg'],
-    'document': ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md'],
-    'audio': ['mp3', 'wav', 'ogg', 'flac', 'm4a'],
-    'video': ['mp4', 'mov', 'avi', 'mkv', 'webm'],
-    'archive': ['zip', 'rar', '7z', 'tar', 'gz']
+    'markdown': ['md'],
+    'image': ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'avif', 'webp', 'svg'],
+    'audio': ['flac', 'm4a', 'mp3', 'ogg', 'wav', 'webm', '3gp'],
+    'video': ['mkv', 'mov', 'mp4', 'ogv', 'webm', 'avi'],
+    'pdf': ['pdf']
 }
 
 # 构建所有扩展名的正则表达式模式
@@ -141,6 +143,37 @@ def fix_directory_timestamps(src_dir: str, dst_dir: str):
         print(f"修复目录时间戳失败 {dst_dir}: {e}")
 
 
+def is_target_directory(src: str, dst: str) -> bool:
+    """
+    判断目标路径是否是目录（考虑隐藏文件特殊性）
+    """
+    # 如果目标路径已存在，则判断是否是目录
+    if os.path.exists(dst):
+        if os.path.isdir(dst):
+            return True
+        else: 
+            raise FileExistsError(f"目标路径已存在且不是目录: {dst}")
+    
+    # 以路径分隔符结尾，则认为是目录
+    if dst.endswith('/') or dst.endswith('\\'):
+        return True
+    
+    # 如果源是隐藏文件，且目标路径无扩展名但以 . 开头，则视为文件
+    if src and os.path.isfile(src):
+        src_name = os.path.basename(src)
+        if src_name.startswith('.'):
+            dst_name = os.path.basename(dst)
+            if dst_name.startswith('.') and os.path.splitext(dst)[1] == '':
+                return False
+    
+    # 如果源是目录，则认为目标路径是目录     
+    elif src and os.path.isdir(src):
+            return True
+    
+    # 一般情况：如果目标路径无扩展名，则认为是目录
+    return os.path.splitext(dst)[1] == ''
+            
+    
 def robocopy_copy(src: str, dst: str) -> bool:
     """
     Windows 系统下使用 robocopy 复制文件或目录，保留时间戳（创建、修改、访问）
@@ -151,33 +184,36 @@ def robocopy_copy(src: str, dst: str) -> bool:
         raise FileNotFoundError(f"源路径不存在: {src}")
 
     is_file = os.path.isfile(src)
+    src_name = os.path.basename(src)
+
+    dst_is_directory = is_target_directory(src, dst)
+    if dst_is_directory:
+        # 目标是目录，复制到该目录下，使用原文件名
+        parent_dst = dst.rstrip('/\\')
+        final_dst = os.path.join(parent_dst, src_name)
+    else:
+        # 目标是文件，直接使用目标文件名
+        parent_dst = os.path.dirname(dst) or '.'  # 假如 data.txt 父目录为空，使用当前目录
+        final_dst = dst
     
-    # 如果目标是文件且源是文件，robocopy 不支持，需后处理
-    dst_is_file = (
-        not dst.endswith(os.sep) and
-        os.path.splitext(dst)[1] != '' and
-        not os.path.isdir(dst)
-    )
+    # 确保父目录存在 
+    os.makedirs(parent_dst, exist_ok=True)
     
     if is_file:
         parent_src = os.path.dirname(src)
-        parent_dst = os.path.dirname(dst) if dst_is_file else dst
-        file_list = [os.path.basename(src)]
+        file_list = [src_name]
     else:
         parent_src = src
-        parent_dst = dst
         file_list = []
 
-    # 创建目标父目录
-    os.makedirs(parent_dst, exist_ok=True)
 
     # 优先使用 shell=False + 列表
     # 构建 robocopy 命令
     cmd = [
         "robocopy",
-        parent_src,
-        parent_dst,
-        *file_list,
+        parent_src,      # 指定源目录
+        parent_dst,      # 指定目标目录（robocopy 只支持目录）
+        *file_list,      # 指定文件名列表
         "/COPY:DAT",     # 复制数据、属性、时间戳
         "/DCOPY:T",      # 复制目录时间戳（创建、修改、访问）
         # "/E",            # 包含子目录（含空目录）
@@ -217,12 +253,12 @@ def robocopy_copy(src: str, dst: str) -> bool:
             print("=== robocopy 错误 ===\n" + result.stderr)
 
         if success:
-            # 如果目标是文件，robocopy 实际复制到了目标目录，替换成目标文件名
-            if is_file and dst_is_file:
-                temp_path = os.path.join(parent_dst, os.path.basename(src))
-                if os.path.exists(temp_path):
-                    os.replace(temp_path, dst)
-            # 修复目录时间戳
+            # 文件场景：robocopy 实际复制到了 parent_dst/src_name，需重命名为 final_dst
+            if is_file:
+                temp_copied = os.path.join(parent_dst, src_name)
+                if os.path.exists(temp_copied) and temp_copied != final_dst:
+                    os.replace(temp_copied, final_dst)
+            # 修复目录时间戳（可选）
             if os.path.isdir(dst) and os.path.isdir(src):
                 fix_directory_timestamps(src, dst)
         else:
@@ -438,7 +474,7 @@ def copy_files_with_timestamps(source_note_dir, ignored_extensions=None):
             destination_path = os.path.join(target_note_dir)
             # print("destination_path", destination_path)
         else:
-            destination_path = os.path.join(target_note_dir, item)
+          destination_path = os.path.join(target_note_dir, item)
         
         # 跳过忽略的文件类型
         if any(source_path.endswith(ext) for ext in ignored_extensions):
@@ -776,36 +812,108 @@ def find_resource_file(source_dir, resource_path, current_note_dir):
     return None
 
 
-def is_web_link(link):
+# 常见顶级域名（TLD），用于区分 Web 链接和本地文件
+COMMON_TLDS = {
+    # 通用
+    'com', 'org', 'net', 'edu', 'gov', 'mil', 'int', 'biz', 'info', 'name', 'pro',
+    'museum', 'coop', 'aero', 'post', 'geo', 'kid', 'law', 'mail', 'sco', 'web',
+    # 国家
+    'cn', 'uk', 'de', 'fr', 'jp', 'au', 'ca', 'ru', 'in', 'br', 'it', 'es', 'nl',
+    # 新通用
+    'app', 'dev', 'io', 'ai', 'co', 'tv', 'xyz', 'online', 'site', 'store', 'tech',
+    'cloud', 'space', 'blog', 'news', 'wiki', 'shop', 'bank', 'sport', 'game',
+    'music', 'movie', 'photo', 'art', 'design', 'studio', 'today', 'world',
+    # 其他常见
+    'us', 'uk', 'eu', 'me', 'tv', 'cc', 'la', 'pw', 'info', 'mobi',
+}
+
+# 文件扩展名黑名单（明确不是 TLD 的）
+FILE_EXTS = {
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+    'txt', 'md', 'markdown', 'rtf', 'log',
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp',
+    'zip', 'rar', '7z', 'tar', 'gz', 'iso',
+    'exe', 'dll', 'bin', 'apk', 'pkg',
+    'mp3', 'wav', 'flac', 'mp4', 'avi', 'mkv', 'mov',
+    'css', 'js', 'json', 'xml', 'html', 'htm',
+    'py', 'java', 'cpp', 'c', 'h', 'go', 'rs', 'ts', 'sh',
+    'tmp', 'bak', 'old', 'swp', 'lock',
+}
+
+def is_web_link(link: str) -> bool:
     """
-    判断链接是否为网页链接
+    判断链接是否为网页链接（外部网络资源）
+    
+    策略：
+    1. 先排除明确的本地链接
+    2. 再判断明确的 Web 链接
+    3. 最后用 TLD + 格式判断模糊情况
     """
-    # 1. 如果以http://或https://开头
-    if link.startswith(('http://', 'https://')):
-        return True
-    
-    # 2. 常见网络协议
-    if link.startswith(('ftp://', 'mailto:', 'tel:')):
-        return True
-    
-    # 3. 标准URL格式（带域名）
-    domain_pattern = re.compile(
-        r'^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}'  # 域名
-        r'(?::\d+)?'  # 端口
-        r'(?:/[^\s]*)?$'  # 路径
+    if not isinstance(link, str) or not link.strip():
+        return False
+    link = link.strip()
+    if not link:
+        return False
+
+    # 1. 明确的本地或特殊协议链接 → 非 Web
+    private_ipprivate_ip_pattern = re.compile(
+        r'\b127\.0\.0\.1\b'                    # 回环地址
+        r'|\b192\.168\.\d+\.\d+\b'             # 192.168.x.x
+        r'|\b10\.\d+\.\d+\.\d+\b'              # 10.x.x.x
+        r'|\b172\.(1[6-9]|2[0-9]|3[01])\.\d+\.\d+\b'  # 172.16.0.0 ~ 172.31.255.255
     )
-    if domain_pattern.match(link):
+    if (
+        link.startswith('obsidian://') or
+        link.startswith('file://') or
+        'localhost' in link.lower() or
+        private_ipprivate_ip_pattern.search(link)
+    ):
+        return False
+
+    # 2. 协议头明确的 Web 链接
+    if link.startswith(('http://', 'https://', 'ftp://', 'mailto:', 'tel:')):
         return True
-    
-    # 4. 协议相对URL（视为外部链接）
+
+    # 3. 协议相对链接（//example.com）
     if link.startswith('//'):
         return True
-    
-    # 5. 本地网络地址（视为本地链接）
-    if 'localhost' in link.lower() or '127.0.0.1' in link.lower():
+
+    # 4. 相对路径或绝对路径 → 本地路径链接
+    if link.startswith(('./', '../', '/')) or '\\' in link or link.startswith('\\\\'):
         return False
     
-    # 6. 其他情况视为本地链接
+    # 5. 纯文件名判断（优先于域名判断）
+    # 如果是 xxx.yyy 格式，且 yyy 不是常见 TLD，则视为文件
+    filename_match = re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*\.([a-zA-Z0-9]{2,6})$', link)
+    if filename_match:
+        ext = filename_match.group(1).lower()
+        # 如果扩展名在文件黑名单中 → 本地
+        if ext in FILE_EXTS:
+            return False
+        # 如果扩展名是公认 TLD → Web
+        if ext in COMMON_TLDS:
+            return True
+        # 模糊情况：不在 TLD 列表中 → 倾向于本地（保守策略）
+        return False
+
+    # 6. 严格域名格式 + TLD 检查
+    # 修改正则：明确捕获 TLD
+    domain_pattern = re.compile(
+        r'^'
+        r'(?:[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*'  # 子域（可选）
+        r'[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'         # 主域名（如 example）
+        r'\.'                                                  # 必须有一个点
+        r'[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'            # 顶级域（如 com, org, xn--）
+        r'(?::\d{1,5})?'                                       # 可选端口（:8080）
+        r'(?:/[^\s]*)?'                                        # 可选路径（/path/to/page）
+        r'$', re.IGNORECASE
+    )
+    if domain_pattern.match(link):
+        tld = link.split('.')[-1].lower()
+        if tld in COMMON_TLDS:
+            return True
+
+    # 7. 其他情况视为本地链接
     return False
 
 
@@ -866,8 +974,8 @@ def convert_wiki_links(note_file_path, updated_content):
                 rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
                 # print('rel_path:', rel_path)
                 
-                # 计算外部链接
-                full_url = f'{external_link_prefix}{rel_path}'
+                # 拼接成完整的 URL
+                full_url = f'{internal_link_prefix}{rel_path}'
                 
                 # 构建新的链接内容
                 if match['embed']:
@@ -931,7 +1039,6 @@ def convert_markdown_links(note_file_path, updated_content):
     
     if matches: 
         for match in matches:
-            type = match['type']
             embed = match['embed']
             resource_path = match['path']
             title = match['title']
@@ -953,7 +1060,7 @@ def convert_markdown_links(note_file_path, updated_content):
                 resource_path = note_file_path
 
             # 处理本地资源链接
-            if not is_web_link(resource_path):
+            if not is_web_link(resource_path) and (not resource_path.startswith('obsidian://')):
                 resource_path = decode_url_space_only(resource_path)
                 resource_name = os.path.basename(resource_path)
                 
@@ -965,7 +1072,108 @@ def convert_markdown_links(note_file_path, updated_content):
                     # 计算相对仓库根目录的路径
                     rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
                     
-                    # 计算外部链接
+                    # 拼接成完整的 URL
+                    external_link_prefix = r'/'
+                    full_url = f'{external_link_prefix}{rel_path}'
+                    
+                    if match['embed']:
+                        full_path = f'!['
+                    else:
+                        full_path = f'['
+                    if not match['desc'] and not match['size']:
+                        full_path += f'{resource_name}'
+                    elif match['desc']:
+                        full_path += f'{match["desc"]}'
+                        if match['size']:
+                            full_path += f'|{match["size"]}'
+                    else:
+                        full_path += f'{match["size"]}'
+                    full_path += f']('
+                    
+                    if match['title'] and not match['block_id']:
+                        full_url += f'#{match["title"]}'
+                    # if (not match['title']) and match['block_id']:
+                    #     full_url += f'#^{match["block_id"]}'
+                    full_url = decode_url_space_only(full_url)
+                    full_url = encode_url_space_only(full_url)
+                    full_path += full_url + ')'    
+                        
+                else:
+                    full_path = match['full_match']
+                    logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
+                    logger.warning(f"📝 在笔记中: {note_file_path}")
+                    logger.warning(f"⏩ 保留原始链接：{full_path}")
+            
+            else:
+                full_path = match['full_match']
+ 
+            # 添加匹配到的链接到内容片段
+            parts.append(full_path)
+            last_end = match['end']
+            
+        # 添加最后一个片段
+        parts.append(updated_content[last_end:])
+        
+        # 拼接所有部分
+        updated_content = ''.join(parts)
+    
+    return updated_content
+
+
+def convert_markdown_links_blog(note_file_path, updated_content):
+    """
+    将 Markdown 链接转换为 Web 可访问的外部链接格式
+    """
+    # 当前笔记所在目录
+    current_note_dir = os.path.dirname(note_file_path)
+    
+    # 提取所有资源链接和图片匹配项
+    matches = extract_markdown_links(updated_content)
+    
+    # 按起始位置正向排序
+    matches.sort(key=lambda m: m['start'])
+    
+    # 使用列表拼接构建新内容
+    parts = []
+    last_end = 0  # 记录上次处理结束位置
+    
+    if matches: 
+        for match in matches:
+            embed = match['embed']
+            resource_path = match['path']
+            title = match['title']
+            block_id = match['block_id']
+            desc = match['desc']
+            size = match['size']
+            if size:
+                if 'x' in size:
+                    width, height = size.split('x')[0], size.split('x')[1]
+                else:
+                    width, height = size, None
+            else:
+                width, height = None, None
+            
+            # 添加匹配前的文本
+            parts.append(updated_content[last_end:match['start']])
+
+            if not resource_path:
+                resource_path = note_file_path
+
+            # 处理本地资源链接
+            if not is_web_link(resource_path) and (not resource_path.startswith('obsidian://')):
+                resource_path = decode_url_space_only(resource_path)
+                resource_name = os.path.basename(resource_path)
+                
+                # 查找资源文件的相对路径
+                resource_relpath = find_resource_file(target_note_dir, resource_path, current_note_dir)
+                
+                # 如果找到资源，生成外部链接格式
+                if resource_relpath:
+                    # 计算相对仓库根目录的路径
+                    rel_path = resource_relpath.replace('\\', '/')  # 统一使用正斜杠
+                    
+                    # 拼接成完整的 URL
+                    external_link_prefix = r'https://gitee.com/quillnk/linkres/raw/master/obsidian/'
                     full_url = f'{external_link_prefix}{rel_path}'
                     
                     if match['title'] and not match['block_id']:
@@ -999,14 +1207,52 @@ def convert_markdown_links(note_file_path, updated_content):
                             elif height:
                                 full_path = f'[{alt_text}|{height}]({full_url})'
                             else:
-                                full_path = f'[{alt_text}]({full_url})'     
-                    else:
-                        # 生成其他文件的 Markdown 链接
-                        display_text = desc or title or block_id or resource_name
-                        display_text = decode_url_space_only(display_text)
+                                full_path = f'[{alt_text}]({full_url})'  
+                    elif file_type == 'audio':
+                        alt_text = desc or resource_name
+                        alt_text = decode_url_space_only(alt_text)
+                        file_ext = resource_name.split('.')[-1]
                         if embed:
-                            full_path = f'![{display_text}]({full_url})'
-                        full_path = f'[{display_text}]({full_url})'
+                            # 生成嵌入式音频的 HTML
+                            full_path = f'<audio controls><source src="{full_url}" type="audio/{file_ext}">{alt_text}</audio>'
+                        else:
+                            # 生成音频的 Markdown 链接
+                            full_path = f'[{alt_text}]({full_url})'
+                    elif file_type == 'video':
+                        alt_text = desc or resource_name
+                        alt_text = decode_url_space_only(alt_text)
+                        file_ext = resource_name.split('.')[-1]
+                        if embed:
+                            # 生成嵌入式视频的 HTML
+                            full_path = f'<video controls><source src="{full_url}" type="video/{file_ext}">{alt_text}</video>'
+                        else:
+                            # 生成视频的 Markdown 链接
+                            full_path = f'[{alt_text}]({full_url})'
+                    elif file_type == 'pdf':
+                        alt_text = desc or resource_name
+                        alt_text = decode_url_space_only(alt_text)
+                        if embed:
+                            # 生成嵌入式 PDF 的 HTML
+                            if width:
+                                full_path = f'<embed src="{full_url}" width="{width}" type="application/pdf">'
+                            elif height:
+                                full_path = f'<embed src="{full_url}" height="{height}" type="application/pdf">'
+                            else:
+                                full_path = f'<embed src="{full_url}" type="application/pdf">'
+                        else:
+                            # 生成 PDF 的 Markdown 链接
+                            full_path = f'[{alt_text}]({full_url})'   
+                    else:
+                        # # 其它文件类型生成 Markdown 链接
+                        # display_text = desc or title or block_id or resource_name
+                        # display_text = decode_url_space_only(display_text)
+                        # if embed:
+                        #     full_path = f'![{display_text}]({full_url})'
+                        # else:
+                        #     full_path = f'[{display_text}]({full_url})'    
+                        
+                        full_path = match['full_match']
+                        
                 else:
                     full_path = match['full_match']
                     logger.warning(f"⚠️ 警告: 资源未找到： {resource_path}")
@@ -1051,8 +1297,10 @@ def update_resource_links(note_file_path):
     # 转换为 Markdown 链接格式
     updated_content = convert_wiki_links(note_file_path, updated_content)
     
-    # 转换为 Web 可访问的外部链接格式
+    # 转换为 Web 可访问的链接格式
     updated_content = convert_markdown_links(note_file_path, updated_content)
+    
+    updated_content = convert_markdown_links_blog(note_file_path, updated_content)
     
     # 恢复代码块
     updated_content = restore_code_blocks(updated_content, code_blocks)
